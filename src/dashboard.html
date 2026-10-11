@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>appdrive</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
+    --ok: #2f7d4f; --bad: #b3261e; --busy: #9a6700; --accent: #3a5bd9; --frame: #111;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --panel: #1c1c1a; --ink: #ecebe6; --muted: #9a9993; --line: #2c2c29;
+      --ok: #6cc28c; --bad: #f2867c; --busy: #e3b341; --accent: #8aa4ff; --frame: #000;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.45 ui-sans-serif, system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 650; }
+  .pill { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .pill.ready { color: var(--ok); } .pill.failed, .pill.crashed, .pill.stopped { color: var(--bad); } .pill.other { color: var(--busy); }
+  .meta { color: var(--muted); font-size: 12px; }
+  .meta code { font: 12px ui-monospace, monospace; color: var(--ink); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 400px); gap: 16px; padding: 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .screen { background: var(--frame); border-radius: 8px; overflow: hidden; position: relative; min-height: 120px; }
+  .screen img { display: block; width: 100%; height: auto; }
+  .screen .empty { color: #888; padding: 40px; text-align: center; }
+  .busy { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,.72); color: #fff; font-size: 12px; padding: 3px 9px; border-radius: 6px; max-width: calc(100% - 16px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .caption { color: var(--muted); font-size: 12px; margin-top: 6px; display: flex; justify-content: space-between; gap: 8px; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  li { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+  li .row { display: flex; gap: 8px; align-items: baseline; }
+  li .mark { font-weight: 700; width: 1em; flex: none; }
+  li.ok .mark { color: var(--ok); } li.bad .mark { color: var(--bad); }
+  li .op { font-weight: 650; }
+  li .args { font: 12px ui-monospace, monospace; overflow-wrap: anywhere; }
+  li .t { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+  li .sum { color: var(--muted); font-size: 12px; margin-left: 1.5em; overflow-wrap: anywhere; white-space: pre-wrap; }
+  li.bad .sum { color: var(--bad); }
+  li img { display: block; margin: 6px 0 0 1.5em; max-width: calc(100% - 1.5em); max-height: 160px; border-radius: 4px; border: 1px solid var(--line); cursor: zoom-in; }
+  .conn { font-size: 11px; color: var(--muted); }
+  .conn.down { color: var(--bad); }
+  dialog { border: 0; padding: 0; background: transparent; max-width: 95vw; }
+  dialog img { max-width: 95vw; max-height: 90vh; display: block; }
+  dialog::backdrop { background: rgba(0,0,0,.7); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="app">appdrive</h1>
+  <span id="phase" class="pill other">connecting</span>
+  <span class="meta" id="where"></span>
+  <span class="conn" id="conn" style="margin-left:auto"></span>
+</header>
+<main>
+  <section>
+    <div class="screen" id="screen">
+      <div class="empty" id="empty">No frame yet</div>
+      <img id="frame" alt="the app on its hidden display" hidden>
+      <div class="busy" id="busy" hidden></div>
+    </div>
+    <div class="caption"><span>Hidden display, live. Native dialogs show here too.</span><span id="frameinfo"></span></div>
+  </section>
+  <aside>
+    <h2>Actions</h2>
+    <ol id="log"></ol>
+  </aside>
+</main>
+<dialog id="zoom"><img id="zoomimg" alt=""></dialog>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const log = $("log");
+  let lastFrame = 0;
+
+  function fmtTime(t) { return new Date(t).toLocaleTimeString(); }
+
+  function setStatus(s) {
+    $("app").textContent = s.app ? `appdrive · ${s.app}` : "appdrive";
+    document.title = `appdrive · ${s.app || ""} · ${s.phase}`;
+    const ph = $("phase");
+    ph.textContent = s.phase;
+    ph.className = "pill " + (["ready", "failed", "crashed", "stopped"].includes(s.phase) ? s.phase : "other");
+    const bits = [];
+    if (s.display) bits.push(`display <code>${s.display}</code> ${s.screen || ""}`);
+    if (s.devPort) bits.push(`dev port <code>${s.devPort}</code>`);
+    if (s.root) bits.push(`<code>${s.root}</code>`);
+    if (s.detail && s.phase !== "ready") bits.push(escapeHtml(s.detail).slice(0, 300));
+    $("where").innerHTML = bits.join(" · ");
+  }
+
+  function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+
+  function addEntry(e) {
+    const li = document.createElement("li");
+    li.className = e.ok === false ? "bad" : "ok";
+    const text = e.error || e.summary || "";
+    li.innerHTML = `<div class="row"><span class="mark">${e.ok === false ? "✗" : "✓"}</span><span class="op">${escapeHtml(e.op)}</span>`
+      + `<span class="args">${escapeHtml(e.args || "")}</span><span class="t">${fmtTime(e.t)}${e.ms != null ? ` · ${e.ms}ms` : ""}</span></div>`
+      + (text ? `<div class="sum">${escapeHtml(text)}</div>` : "")
+      + (e.shot ? `<img src="/shots/${encodeURIComponent(e.shot)}" alt="screenshot ${escapeHtml(e.shot)}" loading="lazy">` : "");
+    const img = li.querySelector("img");
+    if (img) img.onclick = () => { $("zoomimg").src = img.src; $("zoom").showModal(); };
+    log.prepend(li);
+    while (log.children.length > 300) log.lastChild.remove();
+  }
+  $("zoom").onclick = () => $("zoom").close();
+
+  function refreshFrame(v) {
+    if (v && v <= lastFrame) return;
+    lastFrame = v || lastFrame + 1;
+    const next = new Image();
+    next.onload = () => {
+      const f = $("frame");
+      f.src = next.src; f.hidden = false; $("empty").hidden = true;
+      $("frameinfo").textContent = `${next.naturalWidth}x${next.naturalHeight} · ${new Date().toLocaleTimeString()}`;
+    };
+    next.src = `/frame.png?v=${lastFrame}-${Date.now()}`;
+  }
+
+  function connect() {
+    const es = new EventSource("/events");
+    es.addEventListener("hello", (m) => {
+      const d = JSON.parse(m.data);
+      log.innerHTML = "";
+      setStatus(d.status);
+      d.log.forEach(addEntry);
+      // A new session restarts frame versions from 1.
+      lastFrame = 0;
+      if (d.status.frameVersion) refreshFrame(d.status.frameVersion);
+      $("conn").textContent = "live"; $("conn").className = "conn";
+    });
+    es.addEventListener("status", (m) => setStatus(JSON.parse(m.data)));
+    es.addEventListener("action", (m) => { addEntry(JSON.parse(m.data)); $("busy").hidden = true; });
+    es.addEventListener("busy", (m) => {
+      const e = JSON.parse(m.data);
+      $("busy").textContent = `${e.op} ${e.args || ""}…`; $("busy").hidden = false;
+    });
+    es.addEventListener("frame", (m) => refreshFrame(JSON.parse(m.data).v));
+    es.onerror = () => { $("conn").textContent = "disconnected, retrying (no session?)"; $("conn").className = "conn down"; };
+  }
+  connect();
+</script>
+</body>
+</html>

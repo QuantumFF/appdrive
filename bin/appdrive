@@ -1,0 +1,4 @@
+#!/bin/sh
+# Resolve symlinks so ~/.local/bin/appdrive -> this file finds src/.
+here=$(dirname "$(readlink -f "$0")")
+exec bun "$here/../src/cli.ts" "$@"
