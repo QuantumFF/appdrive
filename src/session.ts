@@ -189,7 +189,8 @@ export async function launchDaemon(
   });
   child.unref();
   let last = "";
-  const end = Date.now() + (o.timeoutMs ?? 30 * 60_000);
+  const timeoutMs = o.timeoutMs ?? 30 * 60_000;
+  const end = Date.now() + timeoutMs;
   for (;;) {
     await Bun.sleep(300);
     const st = (await Session.read(L.session)?.status()) ?? null;
@@ -204,6 +205,6 @@ export async function launchDaemon(
       if (st.phase === "ready") return st;
       if (st.phase === "failed") throw new Error(`launch failed: ${st.failure}\n(logs in ${L.logs})`);
     }
-    if (Date.now() > end) throw new Error(`launch is taking over ${Math.round((o.timeoutMs ?? 30 * 60_000) / 60_000)} minutes; check .appdrive/logs/`);
+    if (Date.now() > end) throw new Error(`launch is taking over ${Math.round(timeoutMs / 60_000)} minutes; check .appdrive/logs/`);
   }
 }

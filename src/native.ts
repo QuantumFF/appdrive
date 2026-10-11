@@ -24,6 +24,9 @@ export interface NativeOptions {
   pause?: (ms: number) => Promise<void>;
 }
 
+/** A window id as the CLI passed it (`--window 4194311`). */
+export type WindowId = number | string | null;
+
 export type ListedWindow = XWindow & { app: boolean };
 
 const ESCAPE = 0xff1b;
@@ -36,7 +39,7 @@ export class NativeWindows {
   /** The app's pid (WebDriver's webkit:processID); its windows are not native. 0 until known. */
   appPid = 0;
   private conn: Display | null = null;
-  private known: Set<number> | null = null;
+  private known = new Set<number>();
   private pause: (ms: number) => Promise<void>;
 
   constructor(private o: NativeOptions) {
@@ -53,10 +56,10 @@ export class NativeWindows {
     return (await this.all()).filter((w) => !w.app).map(({ app: _, ...w }) => w);
   }
 
-  /** Native windows that were not there last time. The first call only takes stock. */
+  /** Native windows that were not there last time (the first time, every one). */
   async appeared(): Promise<XWindow[]> {
     const wins = await this.native();
-    const fresh = this.known ? wins.filter((w) => !this.known!.has(w.id)) : [];
+    const fresh = wins.filter((w) => !this.known.has(w.id));
     this.known = new Set(wins.map((w) => w.id));
     return fresh;
   }
@@ -65,7 +68,7 @@ export class NativeWindows {
    * X key chords ("Ctrl+L Escape") to the window asked for, else the topmost
    * native one, else whatever has focus (the app). Returns the window keyed.
    */
-  async keys(spec: string, window?: unknown): Promise<XWindow | null> {
+  async keys(spec: string, window?: WindowId): Promise<XWindow | null> {
     const chords = parseXKeys(spec);
     const target = await this.target(window);
     await this.use(async (d) => {
@@ -76,7 +79,7 @@ export class NativeWindows {
   }
 
   /** Typing, targeted like keys(). */
-  async type(text: string, window?: unknown): Promise<XWindow | null> {
+  async type(text: string, window?: WindowId): Promise<XWindow | null> {
     const target = await this.target(window);
     await this.use(async (d) => {
       if (target) await d.focus(target.id);
@@ -133,7 +136,7 @@ export class NativeWindows {
     this.conn = null;
   }
 
-  private async target(window: unknown): Promise<XWindow | null> {
+  private async target(window: WindowId | undefined): Promise<XWindow | null> {
     const wins = await this.native();
     if (window !== undefined && window !== null && window !== "") {
       const w = wins.find((w) => w.id === Number(window));

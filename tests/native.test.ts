@@ -72,6 +72,7 @@ test("the app's own window is listed but is not native", async () => {
 
 test("appeared() reports only windows that are new since it last looked", async () => {
   const { native, state } = fakeDisplay([win(1, "walltare", APP), win(2, "already open")]);
+  expect((await native.appeared()).map((w) => w.name)).toEqual(["already open"]);
   expect(await native.appeared()).toEqual([]);
   state.windows.push(win(3, "Select Folder"));
   expect((await native.appeared()).map((w) => w.name)).toEqual(["Select Folder"]);

@@ -250,7 +250,7 @@ async function build(vars: Record<string, string | number>): Promise<void> {
     ...process.env,
     ...expandEnv(profile.build.env, vars),
   });
-  if ((await child.exited) !== 0) throw new Error(`build failed: ${child.ended()}`);
+  if ((await child.exited) !== 0) throw new Error(child.ended()!);
 }
 
 async function startDisplay(): Promise<void> {
@@ -359,6 +359,7 @@ async function launch(): Promise<void> {
   await startDisplay();
   await startDevServer(vars);
   await startApp(vars);
+  // Whatever is open by now came with the app, and is not news.
   await native.appeared().catch(() => []);
   setPhase("ready");
   await captureFrame();
