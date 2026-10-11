@@ -1,12 +1,9 @@
 // One per checkout. Owns the hidden display, the dev server, WebKitWebDriver
 // and the app session; serves the CLI's API and the dashboard on 127.0.0.1.
 // Started detached by `appdrive launch`; its stdout is .appdrive/logs/daemon.log.
-import { type ChildProcess, spawn } from "node:child_process";
 import {
   appendFileSync,
-  closeSync,
   existsSync,
-  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -19,9 +16,10 @@ import { Orca } from "./orca.ts";
 import { BRIEF, DESCRIBE, evalScript, FIND, OUTLINE, QUERY, SETTLE } from "./page.ts";
 import { ensureLayout, layout, rootHash } from "./paths.ts";
 import { ephemeralPort, freePort, isFreeEverywhere } from "./ports.ts";
+import { ProcessGroups } from "./procs.ts";
 import { bakedDevPort, expand, expandEnv, loadProfile } from "./profile.ts";
 import { sandboxEnv, seedAppearance, writeShims } from "./sandbox.ts";
-import { pngSize, slug, tail, waitFor, withTimeout } from "./util.ts";
+import { pngSize, slug, waitFor, withTimeout } from "./util.ts";
 import { type ElementRef, elementId, WebDriver, WebDriverError } from "./webdriver.ts";
 import { claimDisplay, type DisplayClaim, socketSnapshot, vanishedSockets } from "./x11.ts";
 import { parseXKeys, XConnection, type XWindow } from "./xproto.ts";
@@ -76,7 +74,6 @@ let lastFrameAt = 0;
 let opBusy = false;
 const startedAt = Date.now();
 const history: LogEntry[] = [];
-const groups = new Map<string, ChildProcess>();
 const wd = new WebDriver("http://127.0.0.1:0");
 
 function diag(msg: string): void {
@@ -177,7 +174,7 @@ const orca = new Orca(opts.root, diag);
 // ---------------------------------------------------------------- session file
 
 function persist(): void {
-  const pgids = Object.fromEntries([...groups].map(([name, c]) => [name, c.pid]));
+  const pgids = groups.pgids();
   writeFileSync(
     L.session,
     JSON.stringify(
@@ -241,47 +238,19 @@ function record(entry: LogEntry): void {
 
 // ---------------------------------------------------------------- processes
 
-function startGroup(name: string, cmd: string, args: string[], env: Record<string, string | undefined>): ChildProcess {
-  const fd = openSync(path.join(L.logs, `${name}.log`), "w");
-  // detached: its own process group, so stop() takes the whole tree (dbus-daemon,
-  // the app, WebKit's helpers, Vite's children) with one signal.
-  const child = spawn(cmd, args, { cwd: opts.root, env, detached: true, stdio: ["ignore", fd, fd] });
-  closeSync(fd);
-  groups.set(name, child);
-  child.on("error", (e) => diag(`${name}: ${e.message}`));
-  child.on("exit", (code, sig) => {
-    diag(`${name} exited (${code ?? sig})`);
-    groups.delete(name);
-    persist();
+const groups = new ProcessGroups({
+  cwd: opts.root,
+  logs: L.logs,
+  onChange: persist,
+  onExit(name, how) {
+    diag(`${name} exited (${how})`);
     if (!stopping && phase === "ready" && name !== "build") {
-      failure = `${name} exited (${code ?? sig}); see ${path.join(L.logs, `${name}.log`)}`;
+      failure = `${name} exited (${how}); see ${path.join(L.logs, `${name}.log`)}`;
       setPhase("crashed", failure);
       orca.comment(`appdrive ▸ ${profile.name} crashed: ${name} exited`);
     }
-  });
-  persist();
-  return child;
-}
-
-function exited(child: ChildProcess): Promise<number | null> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(child.exitCode);
-  return new Promise((resolve) => child.once("exit", (code) => resolve(code)));
-}
-
-function logTail(name: string, lines = 15): string {
-  try {
-    return tail(readFileSync(path.join(L.logs, `${name}.log`), "utf8"), lines);
-  } catch {
-    return "";
-  }
-}
-
-function signalGroup(child: ChildProcess, sig: NodeJS.Signals): void {
-  if (!child.pid) return;
-  try {
-    process.kill(-child.pid, sig);
-  } catch {}
-}
+  },
+});
 
 // ---------------------------------------------------------------- launch
 
@@ -306,12 +275,11 @@ async function chooseDevPort(): Promise<number | null> {
 async function build(vars: Record<string, string | number>): Promise<void> {
   if (!profile.build || !opts.build) return;
   setPhase("building", `${profile.build.cmd.join(" ")} (log: ${path.join(L.logs, "build.log")})`);
-  const child = startGroup("build", profile.build.cmd[0], profile.build.cmd.slice(1), {
+  const child = groups.start("build", profile.build.cmd[0], profile.build.cmd.slice(1), {
     ...process.env,
     ...expandEnv(profile.build.env, vars),
   });
-  const code = await exited(child);
-  if (code !== 0) throw new Error(`build failed (exit ${code}):\n${logTail("build")}`);
+  if ((await child.exited) !== 0) throw new Error(`build failed: ${child.ended()}`);
 }
 
 async function startDisplay(): Promise<void> {
@@ -319,7 +287,7 @@ async function startDisplay(): Promise<void> {
   claim = claimDisplay(L.claims);
   display = claim.display;
   const before = socketSnapshot();
-  const xvfb = startGroup(
+  const xvfb = groups.start(
     "xvfb",
     "Xvfb",
     [`:${display}`, "-screen", "0", `${screen.width}x${screen.height}x24`, "-nolisten", "tcp"],
@@ -330,7 +298,7 @@ async function startDisplay(): Promise<void> {
     () => existsSync(`/tmp/.X11-unix/X${display}`),
     10_000,
     100,
-    () => (xvfb.exitCode !== null ? `Xvfb exited:\n${logTail("xvfb")}` : null),
+    xvfb.ended,
   );
   // Belt and braces for the :1 incident: if any desktop display's socket went
   // away while Xvfb started, take Xvfb down at once and say so loudly.
@@ -339,7 +307,7 @@ async function startDisplay(): Promise<void> {
     return m && Number(m[1]) < 100;
   });
   if (gone.length) {
-    signalGroup(xvfb, "SIGKILL");
+    xvfb.signal("SIGKILL");
     throw new Error(`STOPPED: X sockets vanished while Xvfb :${display} started: ${gone.join(", ")}. Check the desktop's X display.`);
   }
 }
@@ -349,7 +317,7 @@ async function startDevServer(vars: Record<string, string | number>): Promise<vo
   if (!ds || devPort === null) return;
   setPhase("devserver", `${ds.cmd.join(" ")} on port ${devPort}`);
   if (!(await isFreeEverywhere(devPort))) throw new Error(`dev port ${devPort} was taken before the dev server started`);
-  const child = startGroup("devserver", ds.cmd[0], ds.cmd.slice(1), { ...process.env, ...expandEnv(ds.env, vars) });
+  const child = groups.start("devserver", ds.cmd[0], ds.cmd.slice(1), { ...process.env, ...expandEnv(ds.env, vars) });
   const up = async (host: string) => {
     try {
       await fetch(`http://${host}:${devPort}/`, { signal: AbortSignal.timeout(1000) });
@@ -363,7 +331,7 @@ async function startDevServer(vars: Record<string, string | number>): Promise<vo
     async () => (await up("127.0.0.1")) || (await up("[::1]")),
     90_000,
     250,
-    () => (child.exitCode !== null ? `dev server exited:\n${logTail("devserver")}` : null),
+    child.ended,
   );
 }
 
@@ -381,8 +349,8 @@ async function startApp(vars: Record<string, string | number>): Promise<void> {
   });
   // The env (WAYLAND_DISPLAY already gone) is set on dbus-run-session itself, so
   // the private bus and everything it activates never see the live session.
-  const driver = startGroup("webdriver", "dbus-run-session", ["--", "WebKitWebDriver", `--port=${wdPort}`], env);
-  const dead = () => (driver.exitCode !== null ? `WebKitWebDriver exited:\n${logTail("webdriver")}` : null);
+  const driver = groups.start("webdriver", "dbus-run-session", ["--", "WebKitWebDriver", `--port=${wdPort}`], env);
+  const dead = driver.ended;
   await waitFor("WebKitWebDriver", () => wd.ready(), 15_000, 200, dead);
 
   setPhase("app", binary);
@@ -898,13 +866,7 @@ async function stop(reason: string): Promise<void> {
   setPhase("stopping", reason);
   record({ id: ++seq, t: Date.now(), op: "stop", ok: true, summary: reason });
   if (wd.sessionId) await withTimeout(wd.deleteSession(), 5000, "closing the app").catch((e) => diag(e.message));
-  for (const name of ["webdriver", "devserver", "build", "xvfb"]) {
-    const c = groups.get(name);
-    if (c) signalGroup(c, "SIGTERM");
-  }
-  await withTimeout(Promise.all([...groups.values()].map(exited)), 4000, "children").catch(() => {
-    for (const c of groups.values()) signalGroup(c, "SIGKILL");
-  });
+  await groups.stopAll(["webdriver", "devserver", "build", "xvfb"]);
   xconn?.close();
   claim?.release();
   rmSync(L.runtime, { recursive: true, force: true });
