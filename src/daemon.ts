@@ -1,16 +1,9 @@
 // One per checkout. Owns the hidden display, the dev server, WebKitWebDriver
 // and the app session; serves the CLI's API and the dashboard on 127.0.0.1.
 // Started detached by `appdrive launch`; its stdout is .appdrive/logs/daemon.log.
-import {
-  appendFileSync,
-  existsSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { ActionLog, describeArgs } from "./actions.ts";
 import { parseKeys, textActions } from "./keys.ts";
 import { describeWindow, helpersInGroup, NativeWindows, xDisplay } from "./native.ts";
 import { Orca } from "./orca.ts";
@@ -21,7 +14,7 @@ import { ProcessGroups } from "./procs.ts";
 import { bakedDevPort, expand, expandEnv, loadProfile } from "./profile.ts";
 import { sandboxEnv, seedAppearance, writeShims } from "./sandbox.ts";
 import { pngSize, slug, waitFor, withTimeout } from "./util.ts";
-import { type ElementRef, elementId, WebDriver, WebDriverError } from "./webdriver.ts";
+import { type ElementRef, elementId, WebDriver } from "./webdriver.ts";
 import { claimDisplay, type DisplayClaim, socketSnapshot, vanishedSockets } from "./x11.ts";
 
 export interface LaunchOptions {
@@ -37,23 +30,10 @@ export interface LaunchOptions {
 
 export type Phase = "starting" | "building" | "display" | "devserver" | "driver" | "app" | "ready" | "crashed" | "failed" | "stopping";
 
-export interface LogEntry {
-  id: number;
-  t: number;
-  op: string;
-  args?: string;
-  ok?: boolean;
-  ms?: number;
-  summary?: string;
-  error?: string;
-  shot?: string;
-}
-
 const opts: LaunchOptions = JSON.parse(process.argv[2] ?? "{}");
 const L = layout(opts.root);
 if (opts.fresh) rmSync(L.home, { recursive: true, force: true });
 ensureLayout(L);
-if (existsSync(L.log)) renameSync(L.log, L.log.replace(/\.jsonl$/, ".prev.jsonl"));
 
 const profile = loadProfile(opts.root);
 const binary = path.resolve(opts.root, profile.binary);
@@ -67,13 +47,18 @@ let display: number | null = null;
 let claim: DisplayClaim | null = null;
 let devPort: number | null = null;
 let wdPort: number | null = null;
-let seq = 0;
 let lastActivity = Date.now();
 let frameVersion = 0;
 let lastFrameAt = 0;
-let opBusy = false;
 const startedAt = Date.now();
-const history: LogEntry[] = [];
+const log = new ActionLog({
+  file: L.log,
+  onStart: (e) => broadcast("busy", e),
+  onRecord(e) {
+    publish();
+    broadcast("action", e);
+  },
+});
 const wd = new WebDriver("http://127.0.0.1:0");
 
 function diag(msg: string): void {
@@ -125,7 +110,7 @@ async function route(req: Request): Promise<Response> {
       start(c) {
         ctl = c;
         clients.add(c);
-        c.enqueue(enc.encode(`event: hello\ndata: ${JSON.stringify({ status: status(), log: history.slice(-200) })}\n\n`));
+        c.enqueue(enc.encode(`event: hello\ndata: ${JSON.stringify({ status: status(), log: log.recent(200) })}\n\n`));
         if (phase === "ready") void captureFrame();
       },
       cancel() {
@@ -156,7 +141,7 @@ async function route(req: Request): Promise<Response> {
     }
     const op = String(body.op);
     // Notices go to the agent's next real command, not to the shims' own notes.
-    const drain = () => (op === "note" ? [] : notices.splice(0));
+    const drain = () => (op === "note" ? [] : log.takeNotices());
     try {
       const result = await handleOp(op, body.args ?? {});
       return Response.json({ ok: true, result, notices: drain() });
@@ -200,7 +185,7 @@ function status() {
     dashboard: dashboardUrl,
     pid: process.pid,
     startedAt,
-    actions: seq,
+    actions: log.count,
     frameVersion,
     shots: L.shots,
     logs: L.logs,
@@ -215,25 +200,14 @@ function setPhase(p: Phase, d = ""): void {
   publish();
 }
 
-let lastAction = "";
-
 /** The machine-wide registry entry (see Layout.registry). */
 function publish(): void {
   try {
     writeFileSync(
       L.registry,
-      JSON.stringify({ root: opts.root, app: profile.name, url: dashboardUrl, pid: process.pid, phase, failure, startedAt, lastAction }),
+      JSON.stringify({ root: opts.root, app: profile.name, url: dashboardUrl, pid: process.pid, phase, failure, startedAt, lastAction: log.last }),
     );
   } catch {}
-}
-
-function record(entry: LogEntry): void {
-  lastAction = `${entry.ok === false ? "✗" : "✓"} ${entry.op}${entry.args ? ` ${entry.args}` : ""}`.slice(0, 200);
-  publish();
-  history.push(entry);
-  if (history.length > 500) history.shift();
-  appendFileSync(L.log, JSON.stringify(entry) + "\n");
-  broadcast("action", entry);
 }
 
 // ---------------------------------------------------------------- processes
@@ -392,7 +366,7 @@ async function launch(): Promise<void> {
   setPhase("ready");
   await captureFrame();
   const url = await wd.url().catch(() => "?");
-  record({ id: ++seq, t: Date.now(), op: "launch", ok: true, summary: `${profile.name} on :${display} (${url})` });
+  log.add("launch", true, `${profile.name} on :${display} (${url})`);
   orca.comment(`appdrive ▸ ${profile.name} running on hidden display :${display}`);
 }
 
@@ -422,7 +396,7 @@ function captureFrame(): Promise<void> {
 
 // Keep the dashboard live while someone is watching and the agent is quiet.
 setInterval(() => {
-  if (clients.size && phase === "ready" && !opBusy && Date.now() - lastFrameAt > 1500) void captureFrame();
+  if (clients.size && phase === "ready" && !log.busy && Date.now() - lastFrameAt > 1500) void captureFrame();
 }, 1000);
 setInterval(() => {
   for (const c of clients) {
@@ -485,12 +459,8 @@ async function findOne(sel: string, nth = 0, timeout = 5000): Promise<ElementRef
 
 // Things the agent should hear about on its next command: native windows that
 // appeared, openers that were blocked.
-const notices: string[] = [];
-
 function notice(summary: string, ok: boolean): void {
-  notices.push(summary);
-  if (notices.length > 20) notices.shift();
-  record({ id: ++seq, t: Date.now(), op: "note", ok, summary });
+  log.note(summary, ok);
   orca.comment(`appdrive ▸ ${summary}`);
 }
 
@@ -500,7 +470,7 @@ const native = new NativeWindows({
 });
 
 setInterval(async () => {
-  if (phase !== "ready" || opBusy) return;
+  if (phase !== "ready" || log.busy) return;
   const fresh = await native.appeared().catch(() => []);
   if (fresh.length) {
     notice(
@@ -692,27 +662,12 @@ const OPS: Record<string, (a: Args) => Promise<OpResult>> = {
 };
 let shotSeq = existsSync(L.shots) ? readdirSync(L.shots).filter((f) => f.endsWith(".png")).length : 0;
 
-function describeArgs(op: string, a: Args): string {
-  const bits: string[] = [];
-  if (a.sel) bits.push(a.sel);
-  if (op === "type") bits.push(JSON.stringify(a.text ?? ""));
-  if (op === "key") bits.push(a.keys);
-  if (op === "eval") bits.push(String(a.code).slice(0, 60));
-  if (op === "resize") bits.push(`${a.width}x${a.height}`);
-  if (a.nth) bits.push(`#${a.nth}`);
-  for (const f of ["double", "force", "screen", "gone", "all", "focused", "clear"]) if (a[f]) bits.push(`--${f}`);
-  if (a.button && a.button !== "left") bits.push(`--button ${a.button}`);
-  return bits.join(" ");
-}
-
-let queue: Promise<unknown> = Promise.resolve();
-
 async function handleOp(op: string, a: Args): Promise<unknown> {
   switch (op) {
     case "status":
       return status();
     case "log":
-      return history.slice(-(Number(a.n) || 30));
+      return log.recent(Number(a.n) || 30);
     case "note": {
       const argv: string[] = Array.isArray(a.argv) ? a.argv.map(String) : [];
       const summary =
@@ -730,39 +685,29 @@ async function handleOp(op: string, a: Args): Promise<unknown> {
   if (!fn) throw new Error(`unknown op ${op}`);
   if (phase !== "ready") throw new Error(`the session is ${phase}${failure ? `: ${failure}` : detail ? `: ${detail}` : ""}`);
   lastActivity = Date.now();
-  const run = async () => {
-    opBusy = true;
-    const entry: LogEntry = { id: ++seq, t: Date.now(), op, args: describeArgs(op, a) };
-    broadcast("busy", entry);
-    try {
+  const what = `${op} ${describeArgs(op, a)}`.trim();
+  try {
+    const r = await log.run(op, a, async () => {
       const r = await fn(a);
       if (r.mutates) {
         await settle();
         await captureFrame();
       }
-      Object.assign(entry, { ok: true, ms: Date.now() - entry.t, summary: r.summary, shot: r.shot });
-      record(entry);
-      orca.comment(`appdrive ▸ ${op} ${entry.args ?? ""} ✓`.replace(/\s+/g, " "));
-      return r.data;
-    } catch (e) {
-      const msg = e instanceof WebDriverError || e instanceof Error ? e.message : String(e);
-      Object.assign(entry, { ok: false, ms: Date.now() - entry.t, error: msg });
-      record(entry);
-      orca.comment(`appdrive ▸ ${op} ${entry.args ?? ""} ✗ ${msg}`.replace(/\s+/g, " "));
-      if (/invalid session id|no such window/i.test(msg)) {
-        failure = `the app window is gone (${msg})`;
-        setPhase("crashed", failure);
-      } else {
-        void captureFrame();
-      }
-      throw e;
-    } finally {
-      opBusy = false;
+      return r;
+    });
+    orca.comment(`appdrive ▸ ${what} ✓`.replace(/\s+/g, " "));
+    return r.data;
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    orca.comment(`appdrive ▸ ${what} ✗ ${msg}`.replace(/\s+/g, " "));
+    if (/invalid session id|no such window/i.test(msg)) {
+      failure = `the app window is gone (${msg})`;
+      setPhase("crashed", failure);
+    } else {
+      void captureFrame();
     }
-  };
-  const p = queue.then(run, run);
-  queue = p.catch(() => {});
-  return p;
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------- stop
@@ -771,14 +716,13 @@ async function stop(reason: string): Promise<void> {
   if (stopping) return;
   stopping = true;
   setPhase("stopping", reason);
-  record({ id: ++seq, t: Date.now(), op: "stop", ok: true, summary: reason });
+  log.add("stop", true, reason);
   if (wd.sessionId) await withTimeout(wd.deleteSession(), 5000, "closing the app").catch((e) => diag(e.message));
   await groups.stopAll(["webdriver", "devserver", "build", "xvfb"]);
   native.close();
   claim?.release();
   rmSync(L.runtime, { recursive: true, force: true });
-  const actions = history.filter((e) => !["launch", "stop", "note"].includes(e.op)).length;
-  await orca.restore(`appdrive ▸ stopped after ${actions} actions (${reason})`).catch(() => {});
+  await orca.restore(`appdrive ▸ stopped after ${log.actions()} actions (${reason})`).catch(() => {});
   broadcast("status", { ...status(), phase: "stopped", detail: reason });
   rmSync(L.session, { force: true });
   rmSync(L.registry, { force: true });
@@ -804,7 +748,7 @@ launch().catch(async (e: Error) => {
   failure = e.message;
   diag(`launch failed: ${e.stack ?? e.message}`);
   setPhase("failed", e.message);
-  record({ id: ++seq, t: Date.now(), op: "launch", ok: false, error: e.message });
+  log.add("launch", false, e.message);
   orca.comment(`appdrive ▸ launch failed: ${e.message.split("\n")[0]}`);
   // Leave the failure readable for a moment, then clean up everything.
   await Bun.sleep(3000);
