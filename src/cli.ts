@@ -244,6 +244,7 @@ async function launch({ flags, env }: Parsed): Promise<void> {
     last = line;
     if (st.phase === "ready") {
       console.log(`ready: ${st.app} on hidden display ${st.display} (${st.screen}), dev port ${st.devPort ?? "-"}`);
+      for (const [k, v] of Object.entries(st.appEnv ?? {})) console.log(`env: ${k}=${v}`);
       console.log(`dashboard: ${st.dashboard}`);
       console.log(`state: ${L.dir}`);
       return;

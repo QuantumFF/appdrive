@@ -115,6 +115,7 @@ export const DESCRIBE = `${PRELUDE}\nreturn describe(arguments[0]);`;
  */
 export const OUTLINE = `${PRELUDE}
 const CONTROL = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=checkbox],[role=switch],[role=radio],[role=option],[role=combobox],[role=slider],[role=textbox],[role=searchbox],[contenteditable=""],[contenteditable=true],[tabindex]:not([tabindex="-1"])';
+const CONTAINER = '[role=radiogroup],[role=tablist],[role=listbox],[role=menu],[role=menubar],[role=toolbar],[role=group],[role=tree],[role=grid]';
 const CONTEXT = 'h1,h2,h3,[role=dialog],[role=alertdialog],dialog[open],[role=alert],[role=status]';
 const seen = new Set();
 const lines = [];
@@ -167,8 +168,10 @@ const role = (e) => e.getAttribute("role") || (e.tagName === "INPUT" ? "input[" 
 const all = document.body ? [...document.body.querySelectorAll(CONTROL + "," + CONTEXT)] : [];
 for (const e of all) {
   if (seen.has(e) || !visible(e)) continue;
-  // A control inside a control (a span[tabindex] in a button) is noise.
-  if (e.parentElement?.closest(CONTROL) && e.matches(CONTROL) && !e.matches(CONTEXT)) continue;
+  // A control inside a control (a span[tabindex] in a button) is noise, but the
+  // items of a container (a radio in a radiogroup, a tab in a tablist) are the point.
+  const outer = e.parentElement?.closest(CONTROL);
+  if (outer && !outer.matches(CONTAINER) && e.matches(CONTROL) && !e.matches(CONTEXT)) continue;
   seen.add(e);
   let name = labels(e)[0] || norm(e.innerText ?? e.textContent);
   if (name.length > 70) name = name.slice(0, 69) + "…";

@@ -52,7 +52,9 @@ Keys: `appdrive key "Ctrl+K"`, `appdrive key "ArrowDown ArrowDown Enter"`. Typin
 
 `appdrive eval '<js>'` runs in the page and returns JSON (an expression, or a body with
 `return`; promises are awaited). Tauri commands are reachable as
-`window.__TAURI_INTERNALS__.invoke("cmd", {args})`.
+`window.__TAURI_INTERNALS__.invoke("cmd", {args})`. Visual state reads as text too:
+`appdrive eval 'getComputedStyle(document.body).backgroundColor'`, or the `<html>` class for a
+theme.
 
 ## Native windows
 

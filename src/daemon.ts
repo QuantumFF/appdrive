@@ -199,6 +199,7 @@ function status() {
     screen: `${screen.width}x${screen.height}`,
     devPort,
     appPid: appPid || null,
+    appEnv: opts.env ?? {},
     dashboard: dashboardUrl,
     pid: process.pid,
     startedAt,
