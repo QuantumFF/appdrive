@@ -40,9 +40,12 @@ One **session** per checkout (git toplevel), owned by a detached daemon (`src/da
 5. **Serve** the CLI's API, the dashboard and an SSE stream on a stable 127.0.0.1 port per
    checkout, so a dashboard tab left open in Orca reconnects to the next session.
 
-The CLI (`src/cli.ts`) talks to the daemon over HTTP. State lives in `<checkout>/.appdrive/`
-(self-ignoring: it writes its own `.gitignore`): `shots/`, `logs/`, `log.jsonl`, the private
-XDG homes in `home/`.
+The CLI (`src/cli.ts`) talks to the daemon over HTTP; `src/session.ts` holds both sides of that
+protocol (session file, status, op replies, the launch handshake, stopping). The daemon is the
+wiring; the parts with behaviour of their own are modules with tests: `src/procs.ts` (process
+groups), `src/native.ts` (native windows on the hidden display), `src/actions.ts` (the action log).
+State lives in `<checkout>/.appdrive/` (self-ignoring: it writes its own `.gitignore`): `shots/`,
+`logs/`, `log.jsonl`, the private XDG homes in `home/`. Domain terms are in `GLOSSARY.md`.
 
 Profiles (`src/profile.ts`) come from `src-tauri/tauri.conf.json`, then a built-in override per
 app identifier (walltare's port variable and data dir), then `<checkout>/.appdrive.json`
