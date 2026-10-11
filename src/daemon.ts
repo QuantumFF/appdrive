@@ -13,22 +13,10 @@ import { ephemeralPort, freePort, isFreeEverywhere } from "./ports.ts";
 import { ProcessGroups } from "./procs.ts";
 import { bakedDevPort, expand, expandEnv, loadProfile } from "./profile.ts";
 import { sandboxEnv, seedAppearance, writeShims } from "./sandbox.ts";
+import type { LaunchOptions, OpReply, Phase, RegistryEntry, SessionFile, Status } from "./session.ts";
 import { pngSize, slug, waitFor, withTimeout } from "./util.ts";
 import { type ElementRef, elementId, WebDriver } from "./webdriver.ts";
 import { claimDisplay, type DisplayClaim, socketSnapshot, vanishedSockets } from "./x11.ts";
-
-export interface LaunchOptions {
-  root: string;
-  build: boolean;
-  orca: boolean;
-  fresh: boolean;
-  screen: { width: number; height: number } | null;
-  idleMinutes: number;
-  /** Extra app env from `launch --env K=V`, over the profile's. */
-  env: Record<string, string>;
-}
-
-export type Phase = "starting" | "building" | "display" | "devserver" | "driver" | "app" | "ready" | "crashed" | "failed" | "stopping";
 
 const opts: LaunchOptions = JSON.parse(process.argv[2] ?? "{}");
 const L = layout(opts.root);
@@ -137,16 +125,16 @@ async function route(req: Request): Promise<Response> {
     try {
       body = await req.json();
     } catch {
-      return Response.json({ ok: false, error: "body must be JSON" }, { status: 400 });
+      return Response.json({ ok: false, error: "body must be JSON" } satisfies OpReply, { status: 400 });
     }
     const op = String(body.op);
     // Notices go to the agent's next real command, not to the shims' own notes.
     const drain = () => (op === "note" ? [] : log.takeNotices());
     try {
       const result = await handleOp(op, body.args ?? {});
-      return Response.json({ ok: true, result, notices: drain() });
+      return Response.json({ ok: true, result, notices: drain() } satisfies OpReply);
     } catch (e) {
-      return Response.json({ ok: false, error: (e as Error).message, notices: drain() });
+      return Response.json({ ok: false, error: (e as Error).message, notices: drain() } satisfies OpReply);
     }
   }
   return new Response("not found", { status: 404 });
@@ -159,18 +147,20 @@ const orca = new Orca(opts.root, diag);
 // ---------------------------------------------------------------- session file
 
 function persist(): void {
-  const pgids = groups.pgids();
-  writeFileSync(
-    L.session,
-    JSON.stringify(
-      { pid: process.pid, port: server.port, url: dashboardUrl, root: opts.root, app: profile.name, display, startedAt, groups: pgids },
-      null,
-      2,
-    ),
-  );
+  const file: SessionFile = {
+    pid: process.pid,
+    port: server.port!,
+    url: dashboardUrl,
+    root: opts.root,
+    app: profile.name,
+    display,
+    startedAt,
+    groups: groups.pgids(),
+  };
+  writeFileSync(L.session, JSON.stringify(file, null, 2));
 }
 
-function status() {
+function status(): Status {
   return {
     phase,
     detail,
@@ -202,11 +192,18 @@ function setPhase(p: Phase, d = ""): void {
 
 /** The machine-wide registry entry (see Layout.registry). */
 function publish(): void {
+  const entry: RegistryEntry = {
+    root: opts.root,
+    app: profile.name,
+    url: dashboardUrl,
+    pid: process.pid,
+    phase,
+    failure,
+    startedAt,
+    lastAction: log.last,
+  };
   try {
-    writeFileSync(
-      L.registry,
-      JSON.stringify({ root: opts.root, app: profile.name, url: dashboardUrl, pid: process.pid, phase, failure, startedAt, lastAction: log.last }),
-    );
+    writeFileSync(L.registry, JSON.stringify(entry));
   } catch {}
 }
 

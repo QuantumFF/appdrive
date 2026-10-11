@@ -1,13 +1,10 @@
 #!/usr/bin/env bun
 // appdrive: launch, drive and screenshot a Tauri/WebKitGTK app on a hidden
 // display. No pointer, focus, workspace or monitor side effects.
-import { spawn } from "node:child_process";
-import { existsSync, openSync, readFileSync, rmSync } from "node:fs";
-import path from "node:path";
-import type { LaunchOptions } from "./daemon.ts";
-import { findRoot, layout, ensureLayout } from "./paths.ts";
+import { describeWindow, type ListedWindow } from "./native.ts";
+import { ensureLayout, findRoot, layout } from "./paths.ts";
 import { loadProfile } from "./profile.ts";
-import { tail } from "./util.ts";
+import { type LaunchOptions, launchDaemon, Session } from "./session.ts";
 
 const USAGE = `appdrive: drive a Tauri app on a hidden display (no pointer, focus or monitor side effects)
 
@@ -83,99 +80,21 @@ function die(msg: string, code = 1): never {
 const root = findRoot();
 const L = layout(root);
 
-interface SessionFile {
-  pid: number;
-  port: number;
-  url: string;
-  groups: Record<string, number>;
-}
-
-function readSession(): SessionFile | null {
-  try {
-    return JSON.parse(readFileSync(L.session, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function api<T = any>(s: SessionFile, op: string, args: Record<string, unknown> = {}, timeoutMs = 120_000): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(`http://127.0.0.1:${s.port}/api/op`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op, args }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (e) {
-    die(`cannot reach the session daemon (pid ${s.pid}): ${(e as Error).message}`);
-  }
-  const body = (await res.json()) as { ok: boolean; result?: T; error?: string; notices?: string[] };
-  for (const n of body.notices ?? []) console.error(`appdrive notice: ${n}`);
-  if (!body.ok) die(body.error ?? "failed");
-  return body.result as T;
-}
-
-async function getStatus(s: SessionFile): Promise<any | null> {
-  try {
-    const r = await fetch(`http://127.0.0.1:${s.port}/api/status`, { signal: AbortSignal.timeout(3000) });
-    return await r.json();
-  } catch {
-    return null;
-  }
-}
-
 /** The running session, or exit telling the agent to launch. */
-async function session(): Promise<SessionFile> {
-  const s = readSession();
-  if (!s || !alive(s.pid)) die(`no session in ${root}. Run \`appdrive launch\` first.`);
+function session(): Session {
+  const s = Session.read(L.session);
+  if (!s || !s.alive()) die(`no session in ${root}. Run \`appdrive launch\` first.`);
+  s.onNotices = (notices) => {
+    for (const n of notices) console.error(`appdrive notice: ${n}`);
+  };
   return s;
 }
 
-function killGroups(s: SessionFile): void {
-  for (const pgid of Object.values(s.groups ?? {})) {
-    try {
-      process.kill(-pgid, "SIGKILL");
-    } catch {}
-  }
-}
-
-async function stopSession(quiet = false): Promise<void> {
-  const s = readSession();
-  if (!s) {
-    if (!quiet) console.log("no session running");
-    return;
-  }
-  if (alive(s.pid)) {
-    try {
-      await fetch(`http://127.0.0.1:${s.port}/api/op`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ op: "stop" }),
-        signal: AbortSignal.timeout(3000),
-      });
-    } catch {}
-    const end = Date.now() + 15_000;
-    while (alive(s.pid) && Date.now() < end) await Bun.sleep(200);
-    if (alive(s.pid)) {
-      try {
-        process.kill(s.pid, "SIGKILL");
-      } catch {}
-    }
-  }
-  // Whatever the daemon could not take down (it was killed, or crashed).
-  killGroups(s);
-  rmSync(L.session, { force: true });
-  if (!quiet) console.log("stopped");
+async function stopSession(): Promise<void> {
+  const s = Session.read(L.session);
+  if (!s) return console.log("no session running");
+  await s.stop();
+  console.log("stopped");
 }
 
 function parseSize(v: string | boolean | undefined): { width: number; height: number } | null {
@@ -186,20 +105,19 @@ function parseSize(v: string | boolean | undefined): { width: number; height: nu
 }
 
 async function launch({ flags, env }: Parsed): Promise<void> {
-  const existing = readSession();
-  if (existing && alive(existing.pid)) {
-    const st = await getStatus(existing);
+  const existing = Session.read(L.session);
+  if (existing?.alive()) {
+    const st = await existing.status();
     if (flags.restart || !st || ["crashed", "failed", "stopping"].includes(st.phase)) {
       console.error(`appdrive: stopping the previous session (${st?.phase ?? "unresponsive"})`);
-      await stopSession(true);
+      await existing.stop();
     } else {
       console.log(`already running: ${st.app} (${st.phase}) on ${st.display}; dashboard ${st.dashboard}`);
       console.log("Use `appdrive launch --restart` after Rust changes; frontend changes hot-reload.");
       return;
     }
   } else if (existing) {
-    killGroups(existing);
-    rmSync(L.session, { force: true });
+    await existing.stop();
   }
 
   let profile;
@@ -218,40 +136,17 @@ async function launch({ flags, env }: Parsed): Promise<void> {
     idleMinutes: Number(flags.idle ?? 30),
     env: Object.fromEntries(env.map((kv) => [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)])),
   };
-  const logFile = path.join(L.logs, "daemon.log");
-  const fd = openSync(logFile, "w");
-  const child = spawn(process.execPath, [path.join(import.meta.dir, "daemon.ts"), JSON.stringify(opts)], {
-    cwd: root,
-    detached: true,
-    stdio: ["ignore", fd, fd],
-  });
-  child.unref();
   console.error(`appdrive: launching ${profile.name} from ${root}`);
-
-  let last = "";
-  const end = Date.now() + 30 * 60_000;
-  for (;;) {
-    await Bun.sleep(300);
-    const s = readSession();
-    const st = s ? await getStatus(s) : null;
-    if (!alive(child.pid!)) {
-      const log = existsSync(logFile) ? tail(readFileSync(logFile, "utf8"), 20) : "";
-      die(`the session daemon exited during launch:\n${log}`);
-    }
-    if (!st) continue;
-    const line = `${st.phase}${st.detail ? `: ${st.detail}` : ""}`;
-    if (line !== last && st.phase !== "ready" && st.phase !== "failed") console.error(`appdrive: ${line}`);
-    last = line;
-    if (st.phase === "ready") {
-      console.log(`ready: ${st.app} on hidden display ${st.display} (${st.screen}), dev port ${st.devPort ?? "-"}`);
-      for (const [k, v] of Object.entries(st.appEnv ?? {})) console.log(`env: ${k}=${v}`);
-      console.log(`dashboard: ${st.dashboard}`);
-      console.log(`state: ${L.dir}`);
-      return;
-    }
-    if (st.phase === "failed") die(`launch failed: ${st.failure}\n(logs in ${L.logs})`);
-    if (Date.now() > end) die("launch is taking over 30 minutes; check .appdrive/logs/");
+  let st;
+  try {
+    st = await launchDaemon(L, opts, (line) => console.error(`appdrive: ${line}`));
+  } catch (e) {
+    die((e as Error).message);
   }
+  console.log(`ready: ${st.app} on hidden display ${st.display} (${st.screen}), dev port ${st.devPort ?? "-"}`);
+  for (const [k, v] of Object.entries(st.appEnv ?? {})) console.log(`env: ${k}=${v}`);
+  console.log(`dashboard: ${st.dashboard}`);
+  console.log(`state: ${L.dir}`);
 }
 
 function num(v: string | boolean | undefined): number | undefined {
@@ -282,31 +177,38 @@ async function main(): Promise<void> {
     case "stop":
       return stopSession();
     case "status": {
-      const s = readSession();
-      if (!s || !alive(s.pid)) return print("no session");
-      return print((await getStatus(s)) ?? "daemon not responding");
+      const s = Session.read(L.session);
+      if (!s?.alive()) return print("no session");
+      return print((await s.status()) ?? "daemon not responding");
     }
     case "dashboard":
-      return print((await session()).url);
+      return print(session().file.url);
   }
-  const s = await session();
+  const s = session();
+  const api = async <T = any>(op: string, args: Record<string, unknown> = {}): Promise<T> => {
+    try {
+      return await s.op<T>(op, args);
+    } catch (e) {
+      die((e as Error).message);
+    }
+  };
   const need = (n: number, what: string) => {
     if (pos.length < n) die(`${cmd} needs ${what}. See \`appdrive help\`.`);
   };
   switch (cmd) {
     case "outline": {
-      const r = await api(s, "outline");
+      const r = await api("outline");
       console.log(`${r.title} — ${r.url} — ${r.viewport}, focused: ${r.focused}`);
       console.log(r.lines.join("\n") || "(no visible controls)");
       return;
     }
     case "query":
       need(1, "a selector");
-      return print(await api(s, "query", { sel: pos[0], all: !!flags.all, timeout: common.timeout }));
+      return print(await api("query", { sel: pos[0], all: !!flags.all, timeout: common.timeout }));
     case "click":
       need(1, "a selector");
       return print(
-        await api(s, "click", {
+        await api("click", {
           sel: pos[0],
           ...common,
           double: !!flags.double,
@@ -316,22 +218,22 @@ async function main(): Promise<void> {
       );
     case "hover":
       need(1, "a selector");
-      return print(await api(s, "hover", { sel: pos[0], ...common }));
+      return print(await api("hover", { sel: pos[0], ...common }));
     case "type":
       if (flags.focused) {
         need(1, "the text");
-        return print(await api(s, "type", { focused: true, text: pos.join(" ") }));
+        return print(await api("type", { focused: true, text: pos.join(" ") }));
       }
       need(2, "a selector and the text");
-      return print(await api(s, "type", { sel: pos[0], text: pos.slice(1).join(" "), clear: !!flags.clear, ...common }));
+      return print(await api("type", { sel: pos[0], text: pos.slice(1).join(" "), clear: !!flags.clear, ...common }));
     case "key":
       need(1, "keys");
-      return print(await api(s, "key", { keys: pos.join(" ") }));
+      return print(await api("key", { keys: pos.join(" ") }));
     case "wait":
       need(1, "a selector");
-      return print(await api(s, "wait", { sel: pos[0], gone: !!flags.gone, timeout: common.timeout }));
+      return print(await api("wait", { sel: pos[0], gone: !!flags.gone, timeout: common.timeout }));
     case "shot": {
-      const r = await api(s, "shot", {
+      const r = await api("shot", {
         sel: pos[0],
         nth: common.nth,
         screen: !!flags.screen,
@@ -344,34 +246,32 @@ async function main(): Promise<void> {
     }
     case "eval":
       need(1, "JavaScript");
-      return print(await api(s, "eval", { code: pos.join(" "), timeout: common.timeout }));
+      return print(await api("eval", { code: pos.join(" "), timeout: common.timeout }));
     case "resize": {
       need(1, "a size like 1024x768");
       const size = parseSize(pos[0])!;
-      return print(await api(s, "resize", size));
+      return print(await api("resize", size));
     }
     case "reload":
-      return print(await api(s, "reload"));
+      return print(await api("reload"));
     case "dismiss":
-      return print(await api(s, "dismiss"));
+      return print(await api("dismiss"));
     case "windows": {
-      const list = await api<any[]>(s, "windows");
-      for (const w of list) {
-        console.log(`${w.app ? "app   " : "native"} ${w.id}  ${w.name ? JSON.stringify(w.name) : "untitled"} ${w.width}x${w.height}+${w.x}+${w.y}`);
-      }
+      const list = await api<ListedWindow[]>("windows");
+      for (const w of list) console.log(`${w.app ? "app   " : "native"} ${w.id}  ${describeWindow(w)}`);
       if (!list.length) console.log("no windows");
       return;
     }
     case "xkey":
       need(1, "keys");
-      return print(await api(s, "xkey", { keys: pos.join(" "), window: flags.window }));
+      return print(await api("xkey", { keys: pos.join(" "), window: flags.window }));
     case "xtype":
       need(1, "the text");
-      return print(await api(s, "xtype", { text: pos.join(" "), window: flags.window }));
+      return print(await api("xtype", { text: pos.join(" "), window: flags.window }));
     case "xclick":
       need(2, "x and y screen coordinates");
       return print(
-        await api(s, "xclick", {
+        await api("xclick", {
           x: Number(pos[0]),
           y: Number(pos[1]),
           double: !!flags.double,
@@ -379,7 +279,7 @@ async function main(): Promise<void> {
         }),
       );
     case "log": {
-      const entries = await api<any[]>(s, "log", { n: num(pos[0]) ?? 30 });
+      const entries = await api<any[]>("log", { n: num(pos[0]) ?? 30 });
       for (const e of entries) {
         const t = new Date(e.t).toLocaleTimeString();
         const mark = e.ok === false ? "✗" : "✓";
