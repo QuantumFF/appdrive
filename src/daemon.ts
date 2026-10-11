@@ -215,9 +215,24 @@ function setPhase(p: Phase, d = ""): void {
   detail = d;
   diag(`phase ${p}${d ? `: ${d}` : ""}`);
   broadcast("status", status());
+  publish();
+}
+
+let lastAction = "";
+
+/** The machine-wide registry entry (see Layout.registry). */
+function publish(): void {
+  try {
+    writeFileSync(
+      L.registry,
+      JSON.stringify({ root: opts.root, app: profile.name, url: dashboardUrl, pid: process.pid, phase, failure, startedAt, lastAction }),
+    );
+  } catch {}
 }
 
 function record(entry: LogEntry): void {
+  lastAction = `${entry.ok === false ? "✗" : "✓"} ${entry.op}${entry.args ? ` ${entry.args}` : ""}`.slice(0, 200);
+  publish();
   history.push(entry);
   if (history.length > 500) history.shift();
   appendFileSync(L.log, JSON.stringify(entry) + "\n");
@@ -897,6 +912,7 @@ async function stop(reason: string): Promise<void> {
   await orca.restore(`appdrive ▸ stopped after ${actions} actions (${reason})`).catch(() => {});
   broadcast("status", { ...status(), phase: "stopped", detail: reason });
   rmSync(L.session, { force: true });
+  rmSync(L.registry, { force: true });
   diag(`stopped: ${reason}`);
   for (const c of clients) {
     try {

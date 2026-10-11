@@ -44,6 +44,11 @@ export interface Layout {
   runtime: string;
   /** Display claims shared by every session on this machine. */
   claims: string;
+  /**
+   * This session's entry in the machine-wide registry (one JSON file per
+   * running session), read by the Orca plugin to find dashboards.
+   */
+  registry: string;
 }
 
 export function layout(root: string): Layout {
@@ -61,11 +66,12 @@ export function layout(root: string): Layout {
     bin: path.join(dir, "bin"),
     runtime: path.join(runBase, "appdrive", rootHash(root)),
     claims: path.join(runBase, "appdrive", "claims"),
+    registry: path.join(runBase, "appdrive", "sessions", `${rootHash(root)}.json`),
   };
 }
 
 export function ensureLayout(l: Layout): void {
-  for (const d of [l.dir, l.shots, l.logs, l.bin, l.claims]) mkdirSync(d, { recursive: true });
+  for (const d of [l.dir, l.shots, l.logs, l.bin, l.claims, path.dirname(l.registry)]) mkdirSync(d, { recursive: true });
   for (const d of ["config", "data", "cache", "state"]) mkdirSync(path.join(l.home, d), { recursive: true });
   mkdirSync(l.runtime, { recursive: true, mode: 0o700 });
   writeFileSync(path.join(l.dir, ".gitignore"), "*\n");

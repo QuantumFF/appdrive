@@ -1,0 +1,26 @@
+{
+  "manifestVersion": 1,
+  "id": "appdrive",
+  "publisher": "quantumff",
+  "name": "appdrive",
+  "version": "0.1.0",
+  "description": "Find and open the dashboards of appdrive sessions (agents driving your apps on a hidden display), and hear when one crashes.",
+  "engines": { "orca": ">=1.4.0" },
+  "pluginApi": 1,
+  "main": "main.mjs",
+  "contributes": {
+    "commands": [
+      { "id": "open-dashboard", "title": "appdrive: Open this worktree's dashboard", "context": "worktree" },
+      { "id": "open-all", "title": "appdrive: Open every running dashboard", "context": "global" },
+      { "id": "status", "title": "appdrive: Show running sessions", "context": "global" }
+    ],
+    "panels": [{ "id": "about", "title": "appdrive", "icon": "monitor-play", "entry": "panel.html" }],
+    "events": [{ "on": "agent.status.changed" }]
+  },
+  "capabilities": [
+    { "kind": "workspace:read" },
+    { "kind": "notifications:show" },
+    { "kind": "storage" },
+    { "kind": "events:subscribe" }
+  ]
+}

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; --muted: #6b6b66; }
+  @media (prefers-color-scheme: dark) { :root { --muted: #9a9993; } }
+  body { font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 14px 16px; }
+  h1 { font-size: 14px; margin: 0 0 6px; }
+  p { margin: 0 0 10px; }
+  .muted { color: var(--muted); }
+  ul { padding-left: 18px; margin: 0 0 10px; }
+  li { margin-bottom: 4px; }
+  code { font: 12px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<h1>appdrive</h1>
+<p>Agents drive your apps on a hidden display with <code>appdrive</code>: your pointer, focus and monitors stay yours.</p>
+<p>Each session opens its live dashboard as a browser tab in its worktree, and the worktree card shows the last action.</p>
+<p class="muted">Commands (command palette):</p>
+<ul>
+  <li><b>appdrive: Open this worktree's dashboard</b></li>
+  <li><b>appdrive: Open every running dashboard</b></li>
+  <li><b>appdrive: Show running sessions</b></li>
+</ul>
+<p class="muted">You get a notification when a session crashes or fails to launch. This panel is static: Orca panels cannot load live data.</p>
+</body>
+</html>

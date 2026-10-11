@@ -100,6 +100,22 @@ an empty comment, so a card that had none keeps the session's final status. `--n
 all of it. A plugin panel cannot show live data (sandboxed one-shot `srcDoc`, `connect-src
 'none'`), which is why the dashboard is a browser tab.
 
+## Orca plugin
+
+`orca-plugin/` is a dev plugin (`quantumff.appdrive`). Load it once in Orca: Settings → Plugins →
+Development → load `~/repos/appdrive/orca-plugin`, and accept its capabilities (read the focused
+worktree, show notifications, own storage, agent-status events). It adds:
+
+- **appdrive: Open this worktree's dashboard**: switches to the dashboard tab, or opens it
+- **appdrive: Open every running dashboard**
+- **appdrive: Show running sessions**: a notification listing app, worktree, phase, last action
+- a notification when a session crashes or fails to launch (checked when an agent's status
+  changes, since Orca reaps idle plugin workers; once per session)
+- a static panel describing the above (Orca panels get a one-shot `srcDoc` and no network)
+
+It finds sessions through the registry each daemon writes to
+`$XDG_RUNTIME_DIR/appdrive/sessions/<hash>.json` while running.
+
 ## Installed on this machine
 
 - `~/.local/bin/appdrive` → `bin/appdrive`
