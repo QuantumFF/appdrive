@@ -1,19 +1,27 @@
 #!/usr/bin/env bun
 // Claude Code PreToolUse hook for Bash: refuses commands that drive the user's
 // real desktop (global uinput, focus and cursor moves, window moves) and points
-// the agent at appdrive instead. Not installed by default; see README.
+// the agent at appdrive instead. Installed globally in ~/.claude/settings.json:
 //
 //   "hooks": { "PreToolUse": [{ "matcher": "Bash",
 //     "hooks": [{ "type": "command", "command": "bun ~/repos/appdrive/hooks/guard-desktop.ts" }] }] }
 
+// A program in command position: start of a line, or after ; & | ( $( or a
+// backtick, past any env assignments, sudo/exec/env/timeout and a directory.
+// A mere mention (rg ydotool, a commit message) passes.
+const CMD = String.raw`(?:^|[;&|(\x60]|\$\()\s*(?:(?:sudo|exec|env|command|nohup|timeout\s+\S+)\s+|\w+=\S*\s+)*(?:\S*/)?`;
+const run = (prog: string) => new RegExp(`${CMD}${prog}(?=\\s|$|[;&|)])`, "m");
+const viaHyprctl = (expr: string) => new RegExp(String.raw`\bhyprctl\b[^\n;&|]*` + expr);
+
 export const RULES: { pattern: RegExp; what: string }[] = [
-  { pattern: /\bydotool\b/, what: "ydotool types and clicks into whatever window has the user's focus" },
-  { pattern: /\bwtype\b/, what: "wtype types into the user's focused window" },
-  { pattern: /\bhl\.dsp\.(focus|window)/, what: "it moves focus or windows on the user's desktop" },
-  { pattern: /\bcursor\.move/, what: "it moves the user's pointer" },
+  { pattern: run("ydotool"), what: "ydotool types and clicks into whatever window has the user's focus" },
+  { pattern: run("wtype"), what: "wtype types into the user's focused window" },
+  { pattern: viaHyprctl(String.raw`\bhl\.dsp\.(focus|window)`), what: "it moves focus or windows on the user's desktop" },
+  { pattern: viaHyprctl(String.raw`\bcursor\.move`), what: "it moves the user's pointer" },
   {
-    pattern:
-      /\bhyprctl\s+(?:--\S+\s+)*dispatch\s+(focuswindow|focusmonitor|movecursor|movecursortocorner|movewindow|movewindowpixel|resizeactive|resizewindowpixel|movetoworkspace|movetoworkspacesilent|workspace|fullscreen|togglefloating)\b/,
+    pattern: viaHyprctl(
+      String.raw`\bdispatch\s+(focuswindow|focusmonitor|movecursor|movecursortocorner|movewindow|movewindowpixel|resizeactive|resizewindowpixel|movetoworkspace|movetoworkspacesilent|workspace|fullscreen|togglefloating)\b`,
+    ),
     what: "it moves focus, windows, workspaces or the pointer on the user's desktop",
   },
 ];

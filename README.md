@@ -100,12 +100,11 @@ an empty comment, so a card that had none keeps the session's final status. `--n
 all of it. A plugin panel cannot show live data (sandboxed one-shot `srcDoc`, `connect-src
 'none'`), which is why the dashboard is a browser tab.
 
-## Not installed yet
+## Installed on this machine
 
-These live outside this repo and wait for the user's go-ahead:
-
-- `ln -s ~/repos/appdrive/bin/appdrive ~/.local/bin/appdrive`
-- the skill: `ln -s ~/repos/appdrive/skill/appdrive ~/.claude/skills/appdrive`
-- `hooks/guard-desktop.ts` as a global `PreToolUse` hook on Bash (blocks ydotool, wtype,
-  `hl.dsp.focus`/`hl.dsp.window`, `cursor.move` and the moving `hyprctl dispatch` verbs, and
-  points at appdrive)
+- `~/.local/bin/appdrive` → `bin/appdrive`
+- `~/.claude/skills/appdrive` → `skill/appdrive` (edits here are live)
+- `hooks/guard-desktop.ts` as a global `PreToolUse` Bash hook in `~/.claude/settings.json`. It
+  refuses ydotool and wtype in command position, and `hyprctl` calls that move focus, windows,
+  workspaces or the pointer (`dispatch focuswindow`/`movecursor`/…, `hl.dsp.focus`,
+  `hl.dsp.window`, `cursor.move`); reading state (`hyprctl clients`) and mere mentions pass.
