@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { parseKeys, textActions } from "./keys.ts";
+import { describeWindow, helpersInGroup, NativeWindows, xDisplay } from "./native.ts";
 import { Orca } from "./orca.ts";
 import { BRIEF, DESCRIBE, evalScript, FIND, OUTLINE, QUERY, SETTLE } from "./page.ts";
 import { ensureLayout, layout, rootHash } from "./paths.ts";
@@ -22,7 +23,6 @@ import { sandboxEnv, seedAppearance, writeShims } from "./sandbox.ts";
 import { pngSize, slug, waitFor, withTimeout } from "./util.ts";
 import { type ElementRef, elementId, WebDriver, WebDriverError } from "./webdriver.ts";
 import { claimDisplay, type DisplayClaim, socketSnapshot, vanishedSockets } from "./x11.ts";
-import { parseXKeys, XConnection, type XWindow } from "./xproto.ts";
 
 export interface LaunchOptions {
   root: string;
@@ -195,7 +195,7 @@ function status() {
     display: display === null ? null : `:${display}`,
     screen: `${screen.width}x${screen.height}`,
     devPort,
-    appPid: appPid || null,
+    appPid: native.appPid || null,
     appEnv: opts.env ?? {},
     dashboard: dashboardUrl,
     pid: process.pid,
@@ -356,7 +356,7 @@ async function startApp(vars: Record<string, string | number>): Promise<void> {
   setPhase("app", binary);
   if (!existsSync(binary)) throw new Error(`no binary at ${binary}; build it or drop --no-build`);
   const caps = await wd.newSession(binary, profile.args);
-  appPid = Number(caps["webkit:processID"] ?? 0);
+  native.appPid = Number(caps["webkit:processID"] ?? 0);
   diag(`session ${wd.sessionId} ${JSON.stringify(caps)}`);
   await wd.setTimeouts({ script: 30_000, implicit: 0 });
   await wd.setWindowRect({ x: 0, y: 0, width: screen.width, height: screen.height }).catch((e) => diag(`window rect: ${e.message}`));
@@ -388,7 +388,7 @@ async function launch(): Promise<void> {
   await startDisplay();
   await startDevServer(vars);
   await startApp(vars);
-  knownWindows = new Set((await nativeWindows().catch(() => [])).map((w) => w.id));
+  await native.appeared().catch(() => []);
   setPhase("ready");
   await captureFrame();
   const url = await wd.url().catch(() => "?");
@@ -483,27 +483,6 @@ async function findOne(sel: string, nth = 0, timeout = 5000): Promise<ElementRef
   }
 }
 
-// Native windows (portal file chooser, zenity, a file manager) open on the
-// hidden display where WebDriver cannot reach them. They are processes in the
-// session's group, so they can be noticed and ended.
-const NATIVE = /^(xdg-desktop-portal-(gtk|kde|gnome)|zenity|kdialog|yad|dolphin|nautilus|thunar|nemo|pcmanfm(-qt)?)$/;
-
-async function nativeHelpers(): Promise<Map<number, string>> {
-  const out = new Map<number, string>();
-  const pgid = groups.get("webdriver")?.pid;
-  if (!pgid) return out;
-  const proc = Bun.spawn(["ps", "-o", "pid=,args=", "-g", String(pgid)], { stdout: "pipe", stderr: "ignore" });
-  const text = await new Response(proc.stdout).text();
-  await proc.exited;
-  for (const line of text.split("\n")) {
-    const m = /^\s*(\d+)\s+(\S+)/.exec(line);
-    if (!m) continue;
-    const name = path.basename(m[2]);
-    if (NATIVE.test(name)) out.set(Number(m[1]), name);
-  }
-  return out;
-}
-
 // Things the agent should hear about on its next command: native windows that
 // appeared, openers that were blocked.
 const notices: string[] = [];
@@ -515,39 +494,14 @@ function notice(summary: string, ok: boolean): void {
   orca.comment(`appdrive ▸ ${summary}`);
 }
 
-// One connection to the hidden display for window listing and XTEST input.
-let xconn: XConnection | null = null;
-/** The app's pid (WebDriver's webkit:processID); its windows are not "native". */
-let appPid = 0;
-let knownWindows = new Set<number>();
-const isApp = (w: XWindow) => appPid !== 0 && w.pid === appPid;
-
-async function x(): Promise<XConnection> {
-  if (display === null) throw new Error("no display yet");
-  if (!xconn) xconn = await XConnection.open(display);
-  return xconn;
-}
-
-async function nativeWindows(): Promise<XWindow[]> {
-  try {
-    return (await (await x()).windows()).filter((w) => !isApp(w));
-  } catch (e) {
-    xconn?.close();
-    xconn = null;
-    throw e;
-  }
-}
-
-function describeWindow(w: XWindow): string {
-  return `${w.name ? JSON.stringify(w.name) : "untitled"} ${w.width}x${w.height}+${w.x}+${w.y}`;
-}
+const native = new NativeWindows({
+  connect: xDisplay(() => display),
+  helpers: () => helpersInGroup(groups.get("webdriver")?.pid),
+});
 
 setInterval(async () => {
   if (phase !== "ready" || opBusy) return;
-  const wins = await nativeWindows().catch(() => null);
-  if (!wins) return;
-  const fresh = wins.filter((w) => !knownWindows.has(w.id));
-  knownWindows = new Set(wins.map((w) => w.id));
+  const fresh = await native.appeared().catch(() => []);
   if (fresh.length) {
     notice(
       `native window on the hidden display: ${fresh.map(describeWindow).join(", ")}. WebDriver cannot reach it: ` +
@@ -557,17 +511,6 @@ setInterval(async () => {
     void captureFrame();
   }
 }, 1000);
-
-/** The window X input goes to: the one asked for, else the topmost native one. */
-async function nativeTarget(id?: unknown): Promise<XWindow | null> {
-  const wins = await nativeWindows();
-  if (id !== undefined && id !== null && id !== "") {
-    const w = wins.find((w) => w.id === Number(id));
-    if (!w) throw new Error(`no native window ${id}; see \`appdrive windows\``);
-    return w;
-  }
-  return wins[wins.length - 1] ?? null;
-}
 
 async function settle(): Promise<void> {
   try {
@@ -708,69 +651,33 @@ const OPS: Record<string, (a: Args) => Promise<OpResult>> = {
   },
 
   async windows() {
-    const all = await (await x()).windows();
-    const list = all.map((w) => ({ ...w, app: isApp(w) }));
+    const list = await native.all();
     const lines = list.map((w) => `${w.app ? "app   " : "native"} ${w.id}  ${describeWindow(w)}`);
     return { data: list, summary: lines.join("\n") || "no windows" };
   },
 
   async xkey(a) {
-    const target = await nativeTarget(a.window);
-    const conn = await x();
-    if (target) await conn.focus(target.id);
-    for (const chord of parseXKeys(String(a.keys ?? ""))) await conn.keys(chord);
+    const target = await native.keys(String(a.keys ?? ""), a.window);
     const to = target ? describeWindow(target) : "the app window";
     return { data: { pressed: a.keys, window: target?.id ?? null }, summary: `X keys ${a.keys} → ${to}`, mutates: true };
   },
 
   async xtype(a) {
-    const target = await nativeTarget(a.window);
-    const conn = await x();
-    if (target) await conn.focus(target.id);
-    await conn.type(String(a.text ?? ""));
+    const target = await native.type(String(a.text ?? ""), a.window);
     return { data: { typed: a.text, window: target?.id ?? null }, summary: `X typed ${JSON.stringify(a.text)}`, mutates: true };
   },
 
   async xclick(a) {
-    const conn = await x();
-    const px = Math.round(Number(a.x));
-    const py = Math.round(Number(a.y));
-    if (!Number.isFinite(px) || !Number.isFinite(py)) throw new Error("xclick needs screen coordinates: xclick <x> <y>");
-    const button = a.button === "right" ? 3 : a.button === "middle" ? 2 : 1;
-    await conn.click(px, py, button, a.double ? 2 : 1);
-    return { data: { x: px, y: py }, summary: `X click at ${px},${py}`, mutates: true };
+    const at = await native.click(Number(a.x), Number(a.y), { button: a.button, double: !!a.double });
+    return { data: at, summary: `X click at ${at.x},${at.y}`, mutates: true };
   },
 
   async dismiss() {
-    // Escape first, the way a person would close a dialog (a first Escape may
-    // only close a popup inside it); then end whatever is left.
-    const ended: string[] = [];
-    for (let round = 0; round < 3; round++) {
-      const open = await nativeWindows();
-      if (!open.length) break;
-      const conn = await x();
-      for (const w of open.reverse()) {
-        await conn.focus(w.id).catch(() => {});
-        await conn.keys([0xff1b]).catch(() => {});
-        if (round === 0) ended.push(`Escape → ${describeWindow(w)}`);
-      }
-      await Bun.sleep(400);
-    }
-    if ((await nativeWindows()).length) {
-      const helpers = await nativeHelpers();
-      for (const pid of helpers.keys()) {
-        try {
-          process.kill(pid, "SIGTERM");
-        } catch {}
-      }
-      ended.push(...new Set([...helpers.values()].map((n) => `ended ${n}`)));
-      await Bun.sleep(300);
-    }
-    const left = await nativeWindows();
+    const { done, remaining } = await native.dismiss();
     return {
-      data: { done: ended, remaining: left },
-      summary: ended.length
-        ? `${ended.join("; ")}${left.length ? ` · still open: ${left.map(describeWindow).join(", ")}` : ""}`
+      data: { done, remaining },
+      summary: done.length
+        ? `${done.join("; ")}${remaining.length ? ` · still open: ${remaining.map(describeWindow).join(", ")}` : ""}`
         : "no native window open",
       mutates: true,
     };
@@ -867,7 +774,7 @@ async function stop(reason: string): Promise<void> {
   record({ id: ++seq, t: Date.now(), op: "stop", ok: true, summary: reason });
   if (wd.sessionId) await withTimeout(wd.deleteSession(), 5000, "closing the app").catch((e) => diag(e.message));
   await groups.stopAll(["webdriver", "devserver", "build", "xvfb"]);
-  xconn?.close();
+  native.close();
   claim?.release();
   rmSync(L.runtime, { recursive: true, force: true });
   const actions = history.filter((e) => !["launch", "stop", "note"].includes(e.op)).length;
